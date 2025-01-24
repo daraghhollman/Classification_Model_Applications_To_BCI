@@ -14,7 +14,7 @@ from tqdm import tqdm
 from hermpy import mag, utils, trajectory, boundaries, plotting
 
 
-crossings = boundaries.Load_Crossings(utils.User.CROSSING_LISTS["Philpott"])[96:]
+crossings = boundaries.Load_Crossings(utils.User.CROSSING_LISTS["Philpott"])
 crossings = crossings.loc[crossings["Type"].str.contains("BS")]
 
 time_buffer = dt.timedelta(minutes=10)
@@ -47,7 +47,10 @@ for i, crossing in crossings.iterrows():
         (window_start, window_start + dt.timedelta(seconds=window_size))
         for window_start in pd.date_range(start=start, end=end, freq=f"{step_size}s")
     ]
-    window_centres = [window_start + (window_end - window_start) / 2 for window_start, window_end in windows]
+    window_centres = [
+        window_start + (window_end - window_start) / 2
+        for window_start, window_end in windows
+    ]
 
     def Get_Window_Features(input):
         window_start, window_end = input
@@ -55,7 +58,7 @@ for i, crossing in crossings.iterrows():
         data_section = data.loc[data["date"].between(window_start, window_end)]
 
         if len(data_section) == 0:
-            return 
+            return
 
         # Find features
         features = dict()
@@ -109,7 +112,9 @@ for i, crossing in crossings.iterrows():
     samples = []
     missing_indices = []
     with multiprocessing.Pool(20) as pool:
-        for sample_id, sample in enumerate(tqdm(pool.imap(Get_Window_Features, windows), total=len(windows))):
+        for sample_id, sample in enumerate(
+            tqdm(pool.imap(Get_Window_Features, windows), total=len(windows))
+        ):
 
             if sample is not None:
                 samples.append(sample)
@@ -119,7 +124,7 @@ for i, crossing in crossings.iterrows():
     # Create an array initialized with NaN
     solar_wind_probability = np.full(len(windows), np.nan)
 
-    if samples: # Check if we have any samples
+    if samples:  # Check if we have any samples
         samples = pd.concat(samples, ignore_index=True)
         valid_probabilities = random_forest.predict_proba(samples)[:, 1]
         valid_indices = [i for i in range(len(windows)) if i not in missing_indices]
@@ -128,14 +133,21 @@ for i, crossing in crossings.iterrows():
     else:
         raise ValueError("All samples missing")
 
-    fig, (ax, probability_ax) = plt.subplots(2, 1, gridspec_kw={"height_ratios": [3, 1]}, sharex=True)
+
+    # Smoothing
+    solar_wind_probability = pd.Series(solar_wind_probability)
+    solar_wind_probability = solar_wind_probability.rolling(window=10).median()
+
+    fig, (ax, probability_ax) = plt.subplots(
+        2, 1, gridspec_kw={"height_ratios": [3, 1]}, sharex=True
+    )
 
     ax.plot(data["date"], data["|B|"], color="black")
 
     colours = {"Solar Wind": "cornflowerblue", "Magnetosheath": "indianred"}
 
-    uncertainty = True
-    uncertainty_size = 0.2
+    uncertainty = False
+    uncertainty_size = 0.1
     if uncertainty:
 
         solar_wind = solar_wind_probability > 0.5 + uncertainty_size
