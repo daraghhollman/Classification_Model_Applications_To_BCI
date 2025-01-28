@@ -8,27 +8,35 @@ import pickle
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import matplotlib.colors as mcolors
+from matplotlib.collections import LineCollection
 import sklearn.ensemble
 import scipy.stats
 from tqdm import tqdm
 from hermpy import mag, utils, trajectory, boundaries, plotting
 
 
+colours = ["black", "#DC267F", "#648FFF", "#FFB000"]
+
 crossings = boundaries.Load_Crossings(utils.User.CROSSING_LISTS["Philpott"])
 crossings = crossings.loc[crossings["Type"].str.contains("BS")]
 
-crossings = crossings.loc[
-    crossings["Start Time"].between(dt.datetime(2011, 3, 29), dt.datetime(2011, 3, 30))
-]
+crossings = crossings.loc[crossings["Start Time"].between(dt.datetime(2011, 11, 28, 10), dt.datetime(2011, 11, 29))]
 
 time_buffer = dt.timedelta(minutes=10)
+
+# Import application parameters
+window_size = 10  # seconds. How large of a window to feed to the random forest
+step_size = 1  # seconds. How far should the window jump each time
+
 
 # Load Model
 print("Loading model")
 with open(
-    "/home/daraghhollman/Main/Work/mercury/DataSets/bow_shock_random_forest", "rb"
+    "/home/daraghhollman/Main/Work/mercury/DataSets/bow_shock_gradient_boosting", "rb"
 ) as file:
-    random_forest: sklearn.ensemble.RandomForestClassifier = pickle.load(file)
+    random_forest: sklearn.ensemble.HistGradientBoostingClassifier = pickle.load(file)
 
 for i, crossing in crossings.iterrows():
     print(f"Processing crossing {i}")
@@ -43,9 +51,6 @@ for i, crossing in crossings.iterrows():
 
     # Grazing angle calculation requires a reference boundary. This might be an issue
     boundary = "bow shock"
-
-    window_size = 10  # seconds. How large of a window to feed to the random forest
-    step_size = 5  # seconds. How far should the window jump each time
 
     windows = [
         (window_start, window_start + dt.timedelta(seconds=window_size))
@@ -138,16 +143,45 @@ for i, crossing in crossings.iterrows():
         raise ValueError("All samples missing")
 
     # Smoothing
-    solar_wind_probability = pd.Series(solar_wind_probability)
-    solar_wind_probability = solar_wind_probability.rolling(window=10).median()
+    # solar_wind_probability = pd.Series(solar_wind_probability)
+    # solar_wind_probability = solar_wind_probability.rolling(window=10).median()
 
     fig, (ax, probability_ax) = plt.subplots(
         2, 1, gridspec_kw={"height_ratios": [3, 1]}, sharex=True
     )
 
-    ax.plot(data["date"], data["|B|"], color="black")
-
-    colours = {"Solar Wind": "cornflowerblue", "Magnetosheath": "indianred"}
+    ax.plot(
+        data["date"],
+        data["|B|"],
+        color=colours[0],
+        lw=1,
+    )
+    """
+    ax.plot(
+        data["date"],
+        data["Bx"],
+        color=colours[1],
+        lw=1,
+        label="Bx",
+        alpha=0.8,
+    )
+    ax.plot(
+        data["date"],
+        data["By"],
+        color=colours[2],
+        lw=1,
+        label="By",
+        alpha=0.8,
+    )
+    ax.plot(
+        data["date"],
+        data["Bz"],
+        color=colours[3],
+        lw=1,
+        label="Bz",
+        alpha=0.8,
+    )
+    """
 
     uncertainty = True
     uncertainty_size = 0.1
@@ -233,8 +267,37 @@ for i, crossing in crossings.iterrows():
                 )
                 ms_label = ""
 
+    probability_upper = np.ma.masked_where(
+        solar_wind_probability <= 0.5 + uncertainty_size, solar_wind_probability
+    )
+    probability_mid = np.ma.masked_where(
+        (solar_wind_probability <= 0.5 - uncertainty_size)
+        | (solar_wind_probability >= 0.5 + uncertainty_size),
+        solar_wind_probability,
+    )
+    probability_lower = np.ma.masked_where(
+        solar_wind_probability >= 0.5 - uncertainty_size, solar_wind_probability
+    )
+
     probability_ax.plot(
-        window_centres, solar_wind_probability, color="black", zorder=10, lw=2
+        window_centres,
+        solar_wind_probability,
+        color="black",
+        lw=2,
+        ls="dotted",
+        alpha=0.5,
+    )
+
+    probability_ax.plot(
+        window_centres, probability_lower, color="indianred", label=ms_label, lw=3
+    )
+
+    probability_ax.plot(
+        window_centres, probability_mid, color="lightgrey", label=uncertain_label, lw=3
+    )
+
+    probability_ax.plot(
+        window_centres, probability_upper, color="cornflowerblue", label=sw_label, lw=3
     )
 
     ax.legend()
@@ -243,7 +306,7 @@ for i, crossing in crossings.iterrows():
     probability_ax.set_ylabel("Solar Wind Probability")
 
     ax.set_title(
-        f"Random Forest Application (Overlapping Sliding Window)\nWindow Size: {window_size} s    Step Size: {step_size} s"
+        f"Gradient Boosting Application (Overlapping Sliding Window)\nWindow Size: {window_size} s    Step Size: {step_size} s"
     )
 
     ax.margins(0)
@@ -258,3 +321,4 @@ for i, crossing in crossings.iterrows():
     boundaries.Plot_Crossing_Intervals(ax, start, end, crossings, color="black")
 
     plt.show()
+    break
