@@ -12,6 +12,7 @@ import matplotlib.dates as mdates
 import matplotlib.colors as mcolors
 from matplotlib.collections import LineCollection
 import sklearn.ensemble
+from skimage.restoration import denoise_tv_chambolle
 import scipy.stats
 from tqdm import tqdm
 from hermpy import mag, utils, trajectory, boundaries, plotting
@@ -22,13 +23,15 @@ colours = ["black", "#DC267F", "#648FFF", "#FFB000"]
 crossings = boundaries.Load_Crossings(utils.User.CROSSING_LISTS["Philpott"])
 crossings = crossings.loc[crossings["Type"].str.contains("BS")]
 
-crossings = crossings.loc[crossings["Start Time"].between(dt.datetime(2011, 11, 28, 10), dt.datetime(2011, 11, 29))]
+# crossings = crossings.loc[crossings["Start Time"].between(dt.datetime(2011, 3, 24, 12), dt.datetime(2011, 3, 25))]
 
 time_buffer = dt.timedelta(minutes=10)
 
 # Import application parameters
 window_size = 10  # seconds. How large of a window to feed to the random forest
-step_size = 1  # seconds. How far should the window jump each time
+step_size = 5  # seconds. How far should the window jump each time
+smoothing = "TVD" # "TVD", "BoxCar"
+smoothing_size = 5
 
 
 # Load Model
@@ -143,8 +146,16 @@ for i, crossing in crossings.iterrows():
         raise ValueError("All samples missing")
 
     # Smoothing
-    # solar_wind_probability = pd.Series(solar_wind_probability)
-    # solar_wind_probability = solar_wind_probability.rolling(window=10).median()
+    match smoothing:
+        case "TVD":
+            solar_wind_probability = denoise_tv_chambolle(solar_wind_probability)
+
+        case "BoxCar":
+            solar_wind_probability = pd.Series(solar_wind_probability)
+            solar_wind_probability = solar_wind_probability.rolling(window=smoothing_size).median()
+
+        case _:
+            raise ValueError("Unknown choice of smoothing method.")
 
     fig, (ax, probability_ax) = plt.subplots(
         2, 1, gridspec_kw={"height_ratios": [3, 1]}, sharex=True
@@ -321,4 +332,3 @@ for i, crossing in crossings.iterrows():
     boundaries.Plot_Crossing_Intervals(ax, start, end, crossings, color="black")
 
     plt.show()
-    break
