@@ -18,10 +18,29 @@ from tqdm import tqdm
 plot_classifications = True
 plot_crossings = True
 
+boundary = "magnetopause"
+
 colours = ["black", "#DC267F", "#648FFF", "#FFB000"]
 
 crossings = boundaries.Load_Crossings(utils.User.CROSSING_LISTS["Philpott"])
-crossings = crossings.loc[crossings["Type"].str.contains("BS")].iloc[20:]
+
+if boundary == "bow_shock":
+    boundary_code = "BS"
+    region_a_code = "SW"
+    region_b_code = "MSh"
+    region_a_full_name = "Solar Wind"
+    crossings = crossings.loc[crossings["Type"].str.contains("BS")]
+
+elif boundary == "magnetopause":
+    boundary_code = "MP"
+    region_a_code = "MSp"
+    region_b_code = "MSh"
+    region_a_full_name = "Magnetosphere"
+    crossings = crossings.loc[crossings["Type"].str.contains("MP")]
+
+else:
+    raise ValueError(f"Bad choice of variable: boundary = {boundary}")
+
 
 time_buffer = dt.timedelta(minutes=10)
 
@@ -40,10 +59,19 @@ minimum_success_rate = 0.6
 
 # Load Model
 print("Loading model")
-with open(
-    "/home/daraghhollman/Main/Work/mercury/DataSets/bow_shock_random_forest", "rb"
-) as file:
-    model: sklearn.ensemble.HistGradientBoostingClassifier = pickle.load(file)
+
+models = {
+    "Bow Shock RF": "/home/daraghhollman/Main/Work/mercury/DataSets/bow_shock/bow_shock_random_forest",
+    "Bow Shock GB": "/home/daraghhollman/Main/Work/mercury/DataSets/bow_shock/bow_shock_gradient_boosting",
+    "Magnetopause RF": "/home/daraghhollman/Main/Work/mercury/DataSets/magnetopause/magnetopause_random_forest",
+    "Magnetopause GB": "/home/daraghhollman/Main/Work/mercury/DataSets/magnetopause/magnetopause_gradient_boosting",
+}
+
+print("MODELS:")
+print(models.keys())
+
+with open(models[input("-> ")], "rb") as file:
+    model: sklearn.ensemble.RandomForestClassifier = pickle.load(file)
 
 model_features = sorted(model.feature_names_in_)
 
@@ -138,13 +166,13 @@ for i, crossing in crossings.iterrows():
                 missing_indices.append(sample_id)
 
     # Create an array initialized with NaN
-    solar_wind_probability = np.full(len(windows), np.nan)
+    region_a_probability = np.full(len(windows), np.nan)
 
     if samples:  # Check if we have any samples
         samples = pd.concat(samples, ignore_index=True)
         valid_probabilities = model.predict_proba(samples)[:, 1]
         valid_indices = [i for i in range(len(windows)) if i not in missing_indices]
-        solar_wind_probability[valid_indices] = valid_probabilities
+        region_a_probability[valid_indices] = valid_probabilities
 
     else:
         raise ValueError("All samples missing")
@@ -152,11 +180,11 @@ for i, crossing in crossings.iterrows():
     # Smoothing
     match smoothing:
         case "TVD":
-            solar_wind_probability = denoise_tv_chambolle(solar_wind_probability)
+            region_a_probability = denoise_tv_chambolle(region_a_probability)
 
         case "BoxCar":
-            solar_wind_probability = pd.Series(solar_wind_probability)
-            solar_wind_probability = solar_wind_probability.rolling(
+            region_a_probability = pd.Series(region_a_probability)
+            region_a_probability = region_a_probability.rolling(
                 window=smoothing_size
             ).median()
 
@@ -170,60 +198,82 @@ for i, crossing in crossings.iterrows():
     uncertainty_size = 0.1
     if uncertainty:
 
-        solar_wind = solar_wind_probability > 0.5 + uncertainty_size
-        magnetosheath = solar_wind_probability < 0.5 - uncertainty_size
-        uncertain_region = (solar_wind_probability > 0.5 - uncertainty_size) & (
-            solar_wind_probability < 0.5 + uncertainty_size
+        region_a = region_a_probability > 0.5 + uncertainty_size
+        region_b = region_a_probability < 0.5 - uncertainty_size
+        uncertain_region = (region_a_probability > 0.5 - uncertainty_size) & (
+            region_a_probability < 0.5 + uncertainty_size
         )
-        sw_label = f"P(SW) > {0.5 + uncertainty_size}"
-        ms_label = f"P(SW) < {0.5 - uncertainty_size}"
-        uncertain_label = f"{0.5 - uncertainty_size} < P(SW) < {0.5 + uncertainty_size}"
+        region_a_label = f"P({region_a_code}) > {0.5 + uncertainty_size}"
+        region_b_label = f"P({region_a_code}) < {0.5 - uncertainty_size}"
+        uncertain_label = f"{0.5 - uncertainty_size} < P({region_a_code}) < {0.5 + uncertainty_size}"
 
     else:
         uncertainty_size = 0
-        solar_wind = solar_wind_probability > 0.5
-        magnetosheath = solar_wind_probability < 0.5
+        region_a = region_a_probability > 0.5
+        region_b = region_a_probability < 0.5
 
-        sw_label = f"P(SW) > {0.5}"
-        ms_label = f"P(SW) < {0.5}"
+        region_a_label = f"P({region_a_code}) > {0.5}"
+        region_b_label = f"P({region_a_code}) < {0.5}"
         uncertain_label = ""
 
     # Determine success rate
     # We calculate a proxy for how accurate the application is by looking at
     # the ratio of samples *outside* of the boundary crossing interval,
     # which disagree with the region expectation.
-    sw_predictions_before_bci = solar_wind_probability[
+    region_a_predictions_before_bci = region_a_probability[
         np.array(window_centres) < crossing["Start Time"]
     ]
-    sw_predictions_after_bci = solar_wind_probability[
+    region_a_predictions_after_bci = region_a_probability[
         np.array(window_centres) > crossing["End Time"]
     ]
 
     # Use the bow shock direction to determine which region is before and after
     if crossing["Type"] == "BS_IN":
         # Get the proportion of misclassifcations to total
-        # We expect sw before BS_IN, i.e. P(SW) > 0.5
-        success_rate_before = sum(sw_predictions_before_bci > 0.5) / len(
-            sw_predictions_before_bci
+        # We expect SW before BS_IN, i.e. P(SW) > 0.5
+        success_rate_before = sum(region_a_predictions_before_bci > 0.5) / len(
+            region_a_predictions_before_bci
         )
-        success_rate_after = sum(sw_predictions_after_bci < 0.5) / len(
-            sw_predictions_after_bci
+        success_rate_after = sum(region_a_predictions_after_bci < 0.5) / len(
+            region_a_predictions_after_bci
         )
         total_success_rate = (success_rate_before + success_rate_after) / 2
 
     elif crossing["Type"] == "BS_OUT":
         # Get the proportion of misclassifcations to total
-        # We expect ms before BS_OUT, i.e. P(SW) < 0.5
-        success_rate_before = sum(sw_predictions_before_bci < 0.5) / len(
-            sw_predictions_before_bci
+        # We expect MSh before BS_OUT, i.e. P(SW) < 0.5
+        success_rate_before = sum(region_a_predictions_before_bci < 0.5) / len(
+            region_a_predictions_before_bci
         )
-        success_rate_after = sum(sw_predictions_after_bci > 0.5) / len(
-            sw_predictions_after_bci
+        success_rate_after = sum(region_a_predictions_after_bci > 0.5) / len(
+            region_a_predictions_after_bci
+        )
+        total_success_rate = success_rate_before * success_rate_after
+
+    elif crossing["Type"] == "MP_IN":
+        # Get the proportion of misclassifcations to total
+        # We expect MSh before MP_IN, i.e. P(MSp) < 0.5
+        success_rate_before = sum(region_a_predictions_before_bci < 0.5) / len(
+            region_a_predictions_before_bci
+        )
+        success_rate_after = sum(region_a_predictions_after_bci > 0.5) / len(
+            region_a_predictions_after_bci
+        )
+        total_success_rate = success_rate_before * success_rate_after
+
+    elif crossing["Type"] == "MP_OUT":
+        # Get the proportion of misclassifcations to total
+        # We expect MSp before MP_OUT, i.e. P(MSp) > 0.5
+        success_rate_before = sum(region_a_predictions_before_bci > 0.5) / len(
+            region_a_predictions_before_bci
+        )
+        success_rate_after = sum(region_a_predictions_after_bci < 0.5) / len(
+            region_a_predictions_after_bci
         )
         total_success_rate = success_rate_before * success_rate_after
 
     else:
-        raise ValueError("Crossing is not a bow shock")
+        raise ValueError("Crossing is not of a known type")
 
     if total_success_rate < minimum_success_rate and skip_low_success:
         print(f"Skipping due to low success rate: {total_success_rate}")
@@ -236,21 +286,21 @@ for i, crossing in crossings.iterrows():
     # Remove small chains
     if remove_smallest_regions:
 
-        def Remove_Small_Chains(solar_wind_probability, region_length_minimum):
+        def Remove_Small_Chains(region_a_probability, region_length_minimum):
             # Initialize the first region
             chain_length = 1
-            if solar_wind_probability[0] > 0.5:
-                previous_region = "SW"
+            if region_a_probability[0] > 0.5:
+                previous_region = region_a_code
             else:
-                previous_region = "MSh"
+                previous_region = region_b_code
 
             new_predictions = []
             # Loop through predictions and find chain lengths
-            for sw_prediction in solar_wind_probability[1:]:
+            for sw_prediction in region_a_probability[1:]:
                 if sw_prediction > 0.5:
-                    current_region = "SW"
+                    current_region = region_a_code
                 else:
-                    current_region = "MSh"
+                    current_region = region_b_code
 
                 if current_region == previous_region:
                     chain_length += 1
@@ -269,7 +319,9 @@ for i, crossing in crossings.iterrows():
 
             # Handle the last chain after the loop
             if chain_length < region_length_minimum:
-                flipped_region = "MSh" if previous_region == "SW" else "SW"
+                flipped_region = (
+                    region_a_code if previous_region == region_b_code else region_a_code
+                )
                 new_predictions.extend([flipped_region] * chain_length)
             else:
                 new_predictions.extend([previous_region] * chain_length)
@@ -279,16 +331,16 @@ for i, crossing in crossings.iterrows():
         # We need to run the removal code twice to fix edge cases such as:
         # [1, 0, 1, 1, 1, 1]
         new_predictions = Remove_Small_Chains(
-            solar_wind_probability, region_length_minimum
+            region_a_probability, region_length_minimum
         )
-        solar_wind = np.array(new_predictions) == "SW"
-        new_predictions = Remove_Small_Chains(solar_wind, region_length_minimum)
-        solar_wind = np.array(new_predictions) == "SW"
-        new_predictions = Remove_Small_Chains(solar_wind, region_length_minimum)
+        region_a = np.array(new_predictions) == region_a_code
+        new_predictions = Remove_Small_Chains(region_a, region_length_minimum)
+        region_a = np.array(new_predictions) == region_a_code
+        new_predictions = Remove_Small_Chains(region_a, region_length_minimum)
 
         # Convert final predictions to boolean arrays
-        solar_wind = np.array(new_predictions) == "SW"
-        magnetosheath = np.array(new_predictions) == "MSh"
+        region_a = np.array(new_predictions) == region_a_code
+        region_b = np.array(new_predictions) == region_b_code
 
     # Find bow shocks
     # We have a boolean array denoting what region the spacecraft is in
@@ -305,13 +357,13 @@ for i, crossing in crossings.iterrows():
     # @ indices     = [2, 5]
     #
     # i.e. we index the point before the change
-    crossing_indices = np.where(solar_wind[:-1] != solar_wind[1:])[0]
-    crossing_directions = solar_wind[crossing_indices + 1]
+    crossing_indices = np.where(region_a[:-1] != region_a[1:])[0]
+    crossing_directions = region_a[crossing_indices + 1]
 
     new_crossings = [
         {
             "Time": window_centres[i] + (window_centres[i + 1] - window_centres[i]) / 2,
-            "Direction": "BS_IN" if d == 0 else "BS_OUT",
+            "Direction": f"{boundary_code}_IN" if d == 0 else f"{boundary_code}_OUT",
         }
         for i, d in zip(crossing_indices, crossing_directions)
     ]
@@ -359,27 +411,27 @@ for i, crossing in crossings.iterrows():
             alpha = 0.1
 
             if uncertainty:
-                if solar_wind[i]:
+                if region_a[i]:
                     ax.axvspan(
                         window_centres[i] - (dt.timedelta(seconds=step_size)) / 2,
                         window_centres[i] + (dt.timedelta(seconds=step_size)) / 2,
                         color=colours[2],
                         edgecolor=None,
                         alpha=alpha,
-                        label=sw_label,
+                        label=region_a_label,
                     )
-                    sw_label = ""
+                    region_a_label = ""
 
-                elif magnetosheath[i]:
+                elif region_b[i]:
                     ax.axvspan(
                         window_centres[i] - (dt.timedelta(seconds=step_size)) / 2,
                         window_centres[i] + (dt.timedelta(seconds=step_size)) / 2,
                         color=colours[1],
                         edgecolor=None,
                         alpha=alpha,
-                        label=ms_label,
+                        label=region_b_label,
                     )
-                    ms_label = ""
+                    region_b_label = ""
 
                 else:
                     ax.axvspan(
@@ -394,16 +446,16 @@ for i, crossing in crossings.iterrows():
 
             else:
                 uncertain_label = ""
-                if solar_wind[i]:
+                if region_a[i]:
                     ax.axvspan(
                         window_centres[i] - (dt.timedelta(seconds=step_size)) / 2,
                         window_centres[i] + (dt.timedelta(seconds=step_size)) / 2,
                         color=colours[2],
                         edgecolor=None,
                         alpha=alpha,
-                        label=sw_label,
+                        label=region_a_label,
                     )
-                    sw_label = ""
+                    region_a_label = ""
 
                 else:
                     ax.axvspan(
@@ -412,20 +464,20 @@ for i, crossing in crossings.iterrows():
                         color=colours[1],
                         edgecolor=None,
                         alpha=alpha,
-                        label=ms_label,
+                        label=region_b_label,
                     )
-                    ms_label = ""
+                    region_b_label = ""
 
         probability_upper = np.ma.masked_where(
-            solar_wind_probability <= 0.5 + uncertainty_size, solar_wind_probability
+            region_a_probability <= 0.5 + uncertainty_size, region_a_probability
         )
         probability_lower = np.ma.masked_where(
-            solar_wind_probability >= 0.5 - uncertainty_size, solar_wind_probability
+            region_a_probability >= 0.5 - uncertainty_size, region_a_probability
         )
 
         probability_ax.plot(
             window_centres,
-            solar_wind_probability,
+            region_a_probability,
             color="black",
             lw=2,
             ls="dotted",
@@ -433,14 +485,18 @@ for i, crossing in crossings.iterrows():
         )
 
         probability_ax.plot(
-            window_centres, probability_lower, color=colours[1], label=ms_label, lw=3
+            window_centres,
+            probability_lower,
+            color=colours[1],
+            label=region_b_label,
+            lw=3,
         )
 
         if uncertainty:
             probability_mid = np.ma.masked_where(
-                (solar_wind_probability <= 0.5 - uncertainty_size)
-                | (solar_wind_probability >= 0.5 + uncertainty_size),
-                solar_wind_probability,
+                (region_a_probability <= 0.5 - uncertainty_size)
+                | (region_a_probability >= 0.5 + uncertainty_size),
+                region_a_probability,
             )
             probability_ax.plot(
                 window_centres,
@@ -451,13 +507,17 @@ for i, crossing in crossings.iterrows():
             )
 
         probability_ax.plot(
-            window_centres, probability_upper, color=colours[2], label=sw_label, lw=3
+            window_centres,
+            probability_upper,
+            color=colours[2],
+            label=region_a_label,
+            lw=3,
         )
 
         ax.legend()
 
         ax.set_ylabel("|B| [nT]")
-        probability_ax.set_ylabel("Solar Wind Probability")
+        probability_ax.set_ylabel(f"{region_a_full_name} Probability")
 
         ax.set_title(
             f"Gradient Boosting Application (Overlapping Sliding Window)\nWindow Size: {window_size} s    Step Size: {step_size} s"
